@@ -81,6 +81,11 @@ export default {
       event: { message: '', code: '' },
     },
     {
+      name: 'session:expired',
+      label: { en: 'On Session Expired' },
+      event: { reason: '' },
+    },
+    {
       name: 'session:logout',
       label: { en: 'On Logout' },
       event: {},

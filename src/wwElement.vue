@@ -1,5 +1,13 @@
 <template>
   <div class="spread-auth-session" :class="{ 'spread-auth-session--loading': loading }">
+    <!-- Session restoring spinner (shown during auto-restore on mount) -->
+    <div class="spread-auth-session__restoring" v-if="sessionRestoring">
+      <span class="spread-auth-session__spinner spread-auth-session__spinner--lg"></span>
+      <p class="spread-auth-session__restoring-text">Restoring session…</p>
+    </div>
+
+    <!-- Auth form (hidden when authenticated or restoring) -->
+    <template v-if="!wwIsAuthenticated && !sessionRestoring">
     <!-- Heading -->
     <div class="spread-auth-session__header" v-if="displayHeading || displaySubheading">
       <h2 class="spread-auth-session__title" v-if="displayHeading">{{ displayHeading }}</h2>
@@ -127,6 +135,7 @@
         Back to login
       </button>
     </div>
+    </template><!-- end v-if !authenticated && !restoring -->
   </div>
 </template>
 
@@ -212,6 +221,36 @@ function primaryRole(roles) {
   return sorted[0].key;
 }
 
+// ── Cookie Helpers (complies with Golden Rule #4 — no localStorage) ──
+
+const COOKIE_NAME = 'spread_rt';
+const COOKIE_MAX_AGE = 7 * 24 * 60 * 60; // 7 days in seconds
+
+function writeRefreshCookie(token) {
+  try {
+    const doc = wwLib.getFrontDocument();
+    if (!doc) return;
+    doc.cookie = `${COOKIE_NAME}=${encodeURIComponent(token)}; path=/; max-age=${COOKIE_MAX_AGE}; SameSite=Strict; Secure`;
+  } catch (_) { /* editor mode — ignore */ }
+}
+
+function readRefreshCookie() {
+  try {
+    const doc = wwLib.getFrontDocument();
+    if (!doc) return null;
+    const match = doc.cookie.split('; ').find(c => c.startsWith(`${COOKIE_NAME}=`));
+    return match ? decodeURIComponent(match.split('=')[1]) : null;
+  } catch (_) { return null; }
+}
+
+function clearRefreshCookie() {
+  try {
+    const doc = wwLib.getFrontDocument();
+    if (!doc) return;
+    doc.cookie = `${COOKIE_NAME}=; path=/; max-age=0; SameSite=Strict; Secure`;
+  } catch (_) { /* editor mode — ignore */ }
+}
+
 // ── Inline Supabase Client ──
 
 function createSpreadClient({ supabaseUrl, supabaseAnonKey, accessToken = null }) {
@@ -234,6 +273,7 @@ function createSpreadClient({ supabaseUrl, supabaseAnonKey, accessToken = null }
 }
 
 const REFRESH_INTERVAL_MS = 55 * 60 * 1000; // 55 minutes
+const BROADCAST_CHANNEL = 'spread-auth';
 
 export default {
   props: {
@@ -332,6 +372,8 @@ export default {
       currentMode: this.content?.mode || 'login',
       refreshTimer: null,
       _refreshToken: null,
+      _channel: null,
+      sessionRestoring: false,
     };
   },
 
@@ -363,8 +405,75 @@ export default {
     },
   },
 
+  async mounted() {
+    // ── Session restore from cookie ──
+    const savedToken = readRefreshCookie();
+    if (savedToken) {
+      const { supabaseUrl, supabaseAnonKey } = this.content;
+      if (supabaseUrl && supabaseAnonKey) {
+        this.sessionRestoring = true;
+        try {
+          const session = await refreshSession({
+            refreshToken: savedToken,
+            supabaseUrl,
+            supabaseAnonKey,
+          });
+          await this.establishSession(session, supabaseUrl, supabaseAnonKey);
+        } catch (err) {
+          console.warn('Session restore failed:', err.message);
+          clearRefreshCookie();
+          this.$emit('trigger-event', {
+            name: 'session:expired',
+            event: { reason: 'token_stale' },
+          });
+        } finally {
+          this.sessionRestoring = false;
+        }
+      }
+    }
+
+    // ── Cross-tab sync via BroadcastChannel ──
+    try {
+      const win = wwLib.getFrontWindow();
+      if (win && typeof win.BroadcastChannel === 'function') {
+        this._channel = new win.BroadcastChannel(BROADCAST_CHANNEL);
+        this._channel.onmessage = async (ev) => {
+          const data = ev.data;
+          if (!data || !data.type) return;
+
+          if (data.type === 'logout') {
+            this.clearSession();
+            this.$emit('trigger-event', { name: 'session:logout', event: {} });
+          } else if (data.type === 'login' && data.refreshToken) {
+            const { supabaseUrl, supabaseAnonKey } = this.content;
+            if (!supabaseUrl || !supabaseAnonKey) return;
+            try {
+              const session = await refreshSession({
+                refreshToken: data.refreshToken,
+                supabaseUrl,
+                supabaseAnonKey,
+              });
+              await this.establishSession(session, supabaseUrl, supabaseAnonKey, { broadcast: false });
+            } catch (_) {
+              // Cross-tab sync is best-effort
+            }
+          }
+        };
+      }
+    } catch (_) {
+      // BroadcastChannel not available — skip cross-tab sync
+    }
+  },
+
   beforeUnmount() {
     this.stopRefreshTimer();
+    // Close BroadcastChannel
+    try {
+      if (this._channel) {
+        this._channel.close();
+        this._channel = null;
+      }
+    } catch (_) {}
   },
 
   methods: {
@@ -482,9 +591,12 @@ export default {
     },
 
     // ── Session establishment ───────────────────────────────────────────
-    async establishSession(session, supabaseUrl, supabaseAnonKey) {
+    async establishSession(session, supabaseUrl, supabaseAnonKey, { broadcast = true } = {}) {
       const accessToken = session.access_token;
       this._refreshToken = session.refresh_token;
+
+      // Persist refresh token in secure cookie
+      writeRefreshCookie(this._refreshToken);
 
       // Create authenticated Supabase client
       const client = createSpreadClient({ supabaseUrl, supabaseAnonKey, accessToken });
@@ -556,6 +668,13 @@ export default {
         },
       });
 
+      // Broadcast login to other tabs
+      if (broadcast && this._channel) {
+        try {
+          this._channel.postMessage({ type: 'login', refreshToken: this._refreshToken });
+        } catch (_) {}
+      }
+
       // Start token refresh timer
       this.startRefreshTimer(supabaseUrl, supabaseAnonKey);
     },
@@ -573,13 +692,14 @@ export default {
           });
           this._refreshToken = session.refresh_token;
           this.setWwAccessToken(session.access_token);
+          writeRefreshCookie(this._refreshToken);
         } catch (err) {
           console.warn('Token refresh failed:', err.message);
           // On refresh failure, session is stale — clear state
           this.clearSession();
           this.$emit('trigger-event', {
-            name: 'session:error',
-            event: { message: 'Session expired. Please sign in again.', code: 'TOKEN_REFRESH_FAILED' },
+            name: 'session:expired',
+            event: { reason: 'refresh_failed' },
           });
         }
       }, REFRESH_INTERVAL_MS);
@@ -596,6 +716,11 @@ export default {
     async logout() {
       const { supabaseUrl, supabaseAnonKey } = this.content;
       const token = this.wwAccessToken;
+
+      // Broadcast logout to other tabs
+      if (this._channel) {
+        try { this._channel.postMessage({ type: 'logout' }); } catch (_) {}
+      }
 
       this.clearSession();
 
@@ -616,6 +741,7 @@ export default {
     clearSession() {
       this.stopRefreshTimer();
       this._refreshToken = null;
+      clearRefreshCookie();
       this.setWwAccessToken('');
       this.setWwUserId('');
       this.setWwUserEmail('');
@@ -830,6 +956,30 @@ export default {
 
 @keyframes spread-auth-spin {
   to { transform: rotate(360deg); }
+}
+
+.spread-auth-session__spinner--lg {
+  width: 32px;
+  height: 32px;
+  border-width: 3px;
+  border-color: rgba(206, 102, 50, 0.2);
+  border-top-color: var(--_accent);
+}
+
+/* ── Session restoring state ─────────────────────────────────────────────── */
+.spread-auth-session__restoring {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem 1rem;
+  gap: 1rem;
+}
+
+.spread-auth-session__restoring-text {
+  font-size: 14px;
+  color: var(--_text-tertiary);
+  margin: 0;
 }
 
 /* ── Links ───────────────────────────────────────────────────────────────── */
