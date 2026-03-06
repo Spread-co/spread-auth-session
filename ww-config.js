@@ -73,6 +73,8 @@ export default {
         roles: [],
         portalTarget: '',
         primaryRole: '',
+        platformAccessMode: 'members_only',
+        nonMemberMarkupPct: 0,
       },
     },
     {

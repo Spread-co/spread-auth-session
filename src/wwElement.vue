@@ -269,6 +269,16 @@ function createSpreadClient({ supabaseUrl, supabaseAnonKey, accessToken = null }
       }
       return res.json();
     },
+    async rpc(fn, params = {}) {
+      const res = await fetch(`${supabaseUrl}/rest/v1/rpc/${fn}`, {
+        method: 'POST', headers, body: JSON.stringify(params),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        throw new Error(`RPC ${fn}: ${err.message || res.status}`);
+      }
+      return res.json();
+    },
   };
 }
 
@@ -345,6 +355,20 @@ export default {
         type: 'array',
         defaultValue: [],
       });
+    const { value: wwPlatformAccessMode, setValue: setWwPlatformAccessMode } =
+      wwLib.wwVariable.useComponentVariable({
+        uid: 'platformAccessMode',
+        name: 'Platform Access Mode',
+        type: 'string',
+        defaultValue: 'members_only',
+      });
+    const { value: wwNonMemberMarkupPct, setValue: setWwNonMemberMarkupPct } =
+      wwLib.wwVariable.useComponentVariable({
+        uid: 'nonMemberMarkupPct',
+        name: 'Non-Member Markup %',
+        type: 'number',
+        defaultValue: 0,
+      });
 
     return {
       wwAccessToken, setWwAccessToken,
@@ -355,6 +379,8 @@ export default {
       wwDisplayName, setWwDisplayName,
       wwPrimaryRole, setWwPrimaryRole,
       wwRoles, setWwRoles,
+      wwPlatformAccessMode, setWwPlatformAccessMode,
+      wwNonMemberMarkupPct, setWwNonMemberMarkupPct,
     };
   },
 
@@ -431,6 +457,9 @@ export default {
         }
       }
     }
+
+    // ── Fetch platform settings (always — works for both anon and authed) ──
+    await this.fetchPlatformSettings();
 
     // ── Cross-tab sync via BroadcastChannel ──
     try {
@@ -665,6 +694,8 @@ export default {
           roles: flatRoles,
           portalTarget: portal,
           primaryRole: topRole || '',
+          platformAccessMode: this.wwPlatformAccessMode,
+          nonMemberMarkupPct: this.wwNonMemberMarkupPct,
         },
       });
 
@@ -750,6 +781,26 @@ export default {
       this.setWwIsAuthenticated(false);
       this.setWwPrimaryRole('');
       this.setWwRoles([]);
+      // Note: platform settings are NOT cleared on logout — they apply to all visitors
+    },
+
+    // ── Platform settings ───────────────────────────────────────────────
+    async fetchPlatformSettings() {
+      const { supabaseUrl, supabaseAnonKey } = this.content;
+      if (!supabaseUrl || !supabaseAnonKey) return;
+      try {
+        const client = createSpreadClient({ supabaseUrl, supabaseAnonKey });
+        const settings = await client.rpc('get_platform_settings');
+        if (settings) {
+          this.setWwPlatformAccessMode(settings.access_mode || 'members_only');
+          this.setWwNonMemberMarkupPct(Number(settings.non_member_markup_pct) || 0);
+        }
+      } catch (err) {
+        console.warn('Failed to fetch platform settings:', err.message);
+        // Default to members_only (safe fallback)
+        this.setWwPlatformAccessMode('members_only');
+        this.setWwNonMemberMarkupPct(0);
+      }
     },
 
     // ── UI helpers ──────────────────────────────────────────────────────
