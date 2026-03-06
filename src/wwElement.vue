@@ -369,6 +369,13 @@ export default {
         type: 'number',
         defaultValue: 0,
       });
+    const { value: wwMemberReserveWindowDays, setValue: setWwMemberReserveWindowDays } =
+      wwLib.wwVariable.useComponentVariable({
+        uid: 'memberReserveWindowDays',
+        name: 'Member Reserve Window (Days)',
+        type: 'number',
+        defaultValue: 90,
+      });
 
     return {
       wwAccessToken, setWwAccessToken,
@@ -381,6 +388,7 @@ export default {
       wwRoles, setWwRoles,
       wwPlatformAccessMode, setWwPlatformAccessMode,
       wwNonMemberMarkupPct, setWwNonMemberMarkupPct,
+      wwMemberReserveWindowDays, setWwMemberReserveWindowDays,
     };
   },
 
@@ -794,12 +802,14 @@ export default {
         if (settings) {
           this.setWwPlatformAccessMode(settings.access_mode || 'members_only');
           this.setWwNonMemberMarkupPct(Number(settings.non_member_markup_pct) || 0);
+          this.setWwMemberReserveWindowDays(Number(settings.member_reserve_window_days) ?? 90);
         }
       } catch (err) {
         console.warn('Failed to fetch platform settings:', err.message);
         // Default to members_only (safe fallback)
         this.setWwPlatformAccessMode('members_only');
         this.setWwNonMemberMarkupPct(0);
+        this.setWwMemberReserveWindowDays(90);
       }
     },
 

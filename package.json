@@ -1,6 +1,6 @@
 {
   "name": "spread-auth-session",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Supabase Auth session manager with role-based portal routing and platform settings for Spread.co",
   "scripts": {
     "build": "weweb build",
