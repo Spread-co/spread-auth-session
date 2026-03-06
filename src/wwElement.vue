@@ -131,20 +131,121 @@
 </template>
 
 <script>
-import { signIn, signUp, signOut, refreshSession, getUser, resolvePortal, primaryRole } from '../../shared/lib/auth-helper.mjs';
-import { createSpreadClient } from '../../shared/lib/supabase-client.mjs';
+// ── Inline Auth Helpers (no shared lib imports — each component is its own repo) ──
+
+async function signIn({ email, password, supabaseUrl, supabaseAnonKey }) {
+  const res = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'apikey': supabaseAnonKey },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error_description: res.statusText }));
+    throw new Error(err.error_description || err.msg || `Login failed (${res.status})`);
+  }
+  return res.json();
+}
+
+async function signUp({ email, password, supabaseUrl, supabaseAnonKey, metadata = {} }) {
+  const res = await fetch(`${supabaseUrl}/auth/v1/signup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'apikey': supabaseAnonKey },
+    body: JSON.stringify({ email, password, data: metadata }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error_description: res.statusText }));
+    throw new Error(err.error_description || err.msg || `Signup failed (${res.status})`);
+  }
+  return res.json();
+}
+
+async function signOut({ accessToken, supabaseUrl, supabaseAnonKey }) {
+  const res = await fetch(`${supabaseUrl}/auth/v1/logout`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'apikey': supabaseAnonKey,
+      'Authorization': `Bearer ${accessToken}`,
+    },
+  });
+  if (!res.ok && res.status !== 401) {
+    throw new Error(`Logout failed (${res.status})`);
+  }
+}
+
+async function refreshSession({ refreshToken, supabaseUrl, supabaseAnonKey }) {
+  const res = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=refresh_token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'apikey': supabaseAnonKey },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error_description: res.statusText }));
+    throw new Error(err.error_description || err.msg || `Refresh failed (${res.status})`);
+  }
+  return res.json();
+}
+
+async function getUser({ accessToken, supabaseUrl, supabaseAnonKey }) {
+  const res = await fetch(`${supabaseUrl}/auth/v1/user`, {
+    method: 'GET',
+    headers: { 'apikey': supabaseAnonKey, 'Authorization': `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(err.message || `Get user failed (${res.status})`);
+  }
+  return res.json();
+}
+
+function resolvePortal(roles) {
+  if (!roles || roles.length === 0) return 'member';
+  const sorted = [...roles].sort((a, b) => (a.tier ?? 99) - (b.tier ?? 99));
+  if (sorted.some(r => r.is_internal === true)) return 'admin';
+  if (sorted.some(r => r.scope_type === 'farmer')) return 'farmer';
+  return 'member';
+}
+
+function primaryRole(roles) {
+  if (!roles || roles.length === 0) return null;
+  const sorted = [...roles].sort((a, b) => (a.tier ?? 99) - (b.tier ?? 99));
+  return sorted[0].key;
+}
+
+// ── Inline Supabase Client ──
+
+function createSpreadClient({ supabaseUrl, supabaseAnonKey, accessToken = null }) {
+  const headers = { 'Content-Type': 'application/json', 'apikey': supabaseAnonKey };
+  if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
+  return {
+    async from(table, { select = '*', filters = '', limit = null, order = null } = {}) {
+      let url = `${supabaseUrl}/rest/v1/${table}?select=${encodeURIComponent(select)}`;
+      if (filters) url += `&${filters}`;
+      if (limit) url += `&limit=${limit}`;
+      if (order) url += `&order=${order}`;
+      const res = await fetch(url, { method: 'GET', headers });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        throw new Error(`Query ${table}: ${err.message || res.status}`);
+      }
+      return res.json();
+    },
+  };
+}
 
 const REFRESH_INTERVAL_MS = 55 * 60 * 1000; // 55 minutes
 
 export default {
   props: {
-    content: { type: Object, required: true, default: () => ({}) },
     /* wwEditor:start */
-    wwEditorState: { type: Object, required: false, default: () => ({}) },
+    wwEditorState: { type: Object, required: true },
     /* wwEditor:end */
+    content: { type: Object, required: true },
+    wwFrontState: { type: Object, required: true },
+    wwElementState: { type: Object, required: true },
   },
 
-  emits: ['trigger-event'],
+  emits: ['trigger-event', 'update:content'],
 
   setup(props) {
     // Expose session state as WeWeb component variables
